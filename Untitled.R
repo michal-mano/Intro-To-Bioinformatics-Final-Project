@@ -1,1 +1,0 @@
-gse <- getGEO(filename="./tutorial_4/GSE152418_series_matrix.txt")

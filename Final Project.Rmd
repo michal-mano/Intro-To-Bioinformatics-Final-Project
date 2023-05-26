@@ -1,0 +1,308 @@
+---
+title: "Final Project 204881403-204865687"
+author: "Saar Ofek and Michal Mano"
+output: html_document
+date: "2023-02-07"
+---
+
+#### Abstract:
+
+Asthma is a chronic inflammatory disease that affects the lungs and is typically characterized by shortness of breath, wheezing and coughing. Worldwide it affects some 300 million people. Symptom onset can occur at any time during childhood or adulthood. There are varying degrees of asthma from mild cases that require little to no treatment, to severe cases that require long-term use of medication and can be life threatening. There are many factors that are known to affect asthma severity including but not limited to obesity, allergies, and exposure to pollutants, such as in urban areas. It is also known that asthma is more likely among family members, suggesting a genetic link for the disease that is not yet well defined. Our study aims to explore the genetic basis for asthma severity in order to characterize the differences between those affected by mild asthma and those with more severe cases. We used bulk RNA-seq data sets from patients with varying degrees of asthma severity and performed differential expression analysis. Our analysis did not find many differentially expressed genes in those with severe asthma and mild/moderate asthma, however there were a few genes that were upregulated in severe asthma: CYP1B1, LAMA4, and FLNC. Interestingly, there was not a significant difference in expression of these genes between healthy people and mild/moderate cases, suggesting they are unique to severe asthma. In addition, we performed a GWAS analysis and found that many SNPs are associated with asthma in general, and there are certain genes that are more strongly associated with different ages of onset. In conclusion, We found certain genetic differences between mild/moderate asthma and severe asthma. These could be targets for therapies or identification of individuals who are at higher risk of developing asthma related complications.
+
+
+
+
+```{r setup, cache = TRUE, message = FALSE, results = 'hide'}
+library(tidyverse, quietly = T)
+library(DESeq2, quietly = T)
+library(GEOquery, quietly = T)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+library(EnhancedVolcano)
+library(msigdbr)
+library(clusterProfiler)
+library(fastman)
+```
+
+## FIRST ANALYSIS: Bulk RNA DESeq  
+We chose to perform the same DESeq analysis on two different bulk RNA data sets.  
+The first dataset was obtained from 39 patients: 17 with mild/moderate asthma, 6 healthy, 16 severe.  
+The samples were obtained by bronchoalveolar lavage and thus contain cells from the lungs.  
+Dataset: https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE136587  
+```{r, cache=TRUE, message=FALSE, results = 'hide'}
+
+counts <- read.table("./Bulk Data sets/GSE136587_IMSA_BAL_RAW_Counts.txt.gz", header = T, check.names = FALSE, skip = 1)
+counts
+#shorten the column names to be just the sample name without BAL_# at the end, in order to match the metadata
+long_names <- colnames(counts)
+colnames(counts) <- lapply(X=strsplit(x=long_names, split="_"), FUN=function(x) paste0(head(x, n=1), collapse = "_"))
+counts
+gse <- getGEO(filename="./Bulk Data sets/GSE136587_series_matrix.txt")
+metadata <- as_tibble(gse)
+metadata
+```
+Now, we chose columns that could be pertinent to our analysis, and clean them up. Sample, severity, gender, steroid treatment, and age  
+```{r, cache=TRUE}
+metadata <- metadata %>% 
+  dplyr::select(sample = title, severity = characteristics_ch1.1, gender = characteristics_ch1.2, age = characteristics_ch1.3, steroids = characteristics_ch1.4)
+metadata
+# remove prefixes from data and remove a sample that doesn't have info on steroid use
+metadata <- metadata[!metadata$steroids == "",]
+metadata$gender <- gsub("gender: ","", metadata$gender)
+metadata$age <- gsub("age: ", "", metadata$age)
+metadata$steroids <-gsub("steroid: ","", metadata$steroids)
+metadata$severity <- gsub("asthma degree: ","", metadata$severity)
+metadata
+```
+Next we reorder columns in counts so that it lines up with the metadata, and set disease severity as factor  
+```{r, cache=TRUE,message=FALSE}
+
+counts <- cbind(GeneID = counts$GeneID, counts[,metadata$sample])
+all(metadata$sample == colnames(counts)[-1])
+
+```
+
+```{r, cache=TRUE}
+metadata <- mutate(metadata, severity = as.factor(severity))
+metadata$severity
+```
+
+Now our data is preprocessed and is ready to be analyzed with DESeq. Here, we compare mild/moderate asthma with severe asthma patients in an attempt to determine if there are differentially expressed genes.  
+```{r, cache=TRUE, message=FALSE, results = 'hide'}
+dds <- DESeqDataSetFromMatrix(countData=counts,
+                              colData=metadata,
+                              design= ~ steroids + gender + severity,
+                              tidy=TRUE)  
+dds$severity <- relevel(dds$severity, "severe")
+dds <- DESeq(dds)
+resultsNames(dds)
+res <- results(dds)
+summary(res)
+resLFC <- lfcShrink(dds, coef="severity_mild.moderate_vs_severe", type="apeglm")
+resOrdered <- resLFC[order(resLFC$pvalue),]
+resOrdered
+write.csv(resOrdered, "signif_results.csv")
+```
+
+```{r, cache=TRUE}
+EnhancedVolcano(resOrdered,
+                lab = rownames(resOrdered),
+                x = 'log2FoldChange',
+                y = 'padj',
+                labSize = 4, title = 'Mild/Moderate vs Severe - BAL',
+                pCutoff = 10e-5)
+```
+We will take a closer look at the gene CYP1B1.  
+```{r, cache=TRUE}
+
+i <- which(rownames(resOrdered)=='CYP1B1')
+resOrdered[i,]
+d <- plotCounts(dds, gene=rownames(resOrdered)[i], intgroup="severity", returnData=TRUE)
+ggplot(d, aes(x = reorder(severity, count, FUN=median), y = count)) + 
+  geom_boxplot(aes(fill=severity)) + 
+  ggtitle("CYP1B1") + 
+  coord_cartesian(ylim = c(0,200)) +
+  xlab("Disease Severity")
+
+```
+
+---
+### Additional DESeq analysis on another data set. 
+This contains 67 samples: 26 mild/moderate, 17 healthy, and 25 severe. These samples are bronchial epithelial cells, so a different part of the airway.  
+Dataset: https://www.ncbi.nlm. nih.gov/geo/query/acc. cgi?acc=GSE158752  
+```{r, cache=TRUE,message=FALSE, results = 'hide'}
+counts_BEC <- read.table("./Bulk Data sets/GSE158752_IMSA_BEC-RAW_Counts.txt.gz", header = T, check.names = FALSE)
+counts_BEC
+#here we won't shorten the names because it already matches the metadata
+gse <- getGEO(filename="./Bulk Data sets/GSE158752_series_matrix.txt")
+metadata_BEC <- as_tibble(gse)
+metadata_BEC
+```
+We select the same characteristics as the previous dataset and clean it up.  
+```{r, cache=TRUE}
+metadata_BEC <- metadata_BEC %>% 
+  dplyr::select(sample = title, severity = characteristics_ch1.2, gender = characteristics_ch1.4, age = characteristics_ch1.6, steroids = characteristics_ch1.3)
+metadata_BEC
+
+metadata_BEC$gender <- gsub("gender: ","", metadata_BEC$gender)
+metadata_BEC$age <- gsub("age: ", "", metadata_BEC$age)
+metadata_BEC$steroids <- gsub("steroid: ","", metadata_BEC$steroids)
+metadata_BEC$severity <- gsub("diagnosis: ","", metadata_BEC$severity)
+
+#one sample has "steroid:n instead of the full word "no".
+metadata_BEC <- metadata_BEC %>%
+  mutate(steroids = str_replace(steroids, "no", "n")) %>%
+  mutate(steroids = str_replace(steroids, "n", "no"))
+metadata_BEC
+```
+The data in counts is already lined up with the metadata.  
+```{r, cache=TRUE}
+all(metadata_BEC$sample == colnames(counts_BEC)[-1])
+
+metadata_BEC <- mutate(metadata_BEC, severity = as.factor(severity))
+
+metadata_BEC$severity
+```
+Again, we compare Mild/Moderate asthma with severe asthma.  
+```{r, cache=TRUE,message=FALSE, results = 'hide'}
+dds_BEC <- DESeqDataSetFromMatrix(countData=counts_BEC,
+                              colData=metadata_BEC,
+                              design= ~gender + steroids + severity,
+                              tidy=TRUE)  
+dds_BEC$severity <-relevel(dds_BEC$severity, "Severe Asthma")
+dds_BEC <-DESeq(dds_BEC)
+res_BEC <- results(dds_BEC)
+resultsNames(dds_BEC)
+summary(res_BEC)
+resLFC_BEC <- lfcShrink(dds_BEC, coef="severity_M.M.Asthma_vs_Severe.Asthma", type="apeglm")
+
+resOrdered_BEC <- resLFC_BEC[order(resLFC_BEC$pvalue),]
+resOrdered_BEC
+write.csv(resOrdered_BEC, "signif_results_BEC.csv")
+```
+
+
+```{r, cache=TRUE}
+EnhancedVolcano(resOrdered_BEC,
+                lab = rownames(resOrdered_BEC),
+                x = 'log2FoldChange',
+                y = 'padj',
+                title = 'Mild/Moderate vs Severe - BEC',
+                labSize = 3,drawConnectors = TRUE,
+                widthConnectors = 0.75,
+                )
+
+```
+This volcano plot gave us two significant genes. LAMA4 and FLNC. We'll make a boxplot for each.  
+```{r, cache=TRUE}
+
+i <- which(rownames(resOrdered_BEC)=='LAMA4')
+resOrdered_BEC[i,]
+d <- plotCounts(dds_BEC, gene=rownames(resOrdered_BEC)[i], intgroup="severity", returnData=TRUE)
+ggplot(d, aes(x = reorder(severity, count, FUN=median), y = count)) + 
+  geom_boxplot(aes(fill=severity)) + 
+  ggtitle("LAMA4") + 
+  coord_cartesian(ylim = c(0,200)) +
+  xlab("Disease Severity")
+
+```
+
+```{r, cache=TRUE}
+
+i <- which(rownames(resOrdered_BEC)=='FLNC')
+resOrdered_BEC[i,]
+d <- plotCounts(dds_BEC, gene=rownames(resOrdered_BEC)[i], intgroup="severity", returnData=TRUE)
+
+ggplot(d, aes(x = reorder(severity, count, FUN=median), y = count)) + 
+  geom_boxplot(aes(fill=severity)) + 
+  ggtitle("FLNC") + 
+  coord_cartesian(ylim = c(0,300)) +
+  xlab("Disease Severity")
+
+```
+We note that Mild/Moderate isn't in between healthy and severe, it's more similar to Healthy.  
+We'll make a heatmap to visualize the top differentially expressed genes in the second dataset.  
+The heatmap doesn't look very interesting but we should note that it successfully clustered out severe cases, whereas the healthy and mild/moderate are combined in the same cluster and are interspersed.  
+```{r, cache=TRUE}
+
+# Take top 10 genes with the lowest p-value that express in severe asthma (log2FoldChange>0)
+selectUp <- rownames(resOrdered_BEC)[resOrdered_BEC$log2FoldChange>0][1:10]
+# Take top 10 genes with the lowest  p-value that express in mild/moderate asthma (log2FoldChange<0)
+selectDown <- rownames(resOrdered_BEC)[resOrdered_BEC$log2FoldChange<0][1:10]
+select <- c(selectUp,selectDown)
+
+df <- data.frame(row.names = colnames(dds_BEC),
+                 severity = colData(dds_BEC)$severity,
+                 steroids = colData(dds_BEC)$steroids)
+
+# Get normalized counts
+normcounts = assay(vst(dds_BEC), blind=T)
+
+pheatmap::pheatmap(normcounts[select,], cluster_rows=TRUE,
+         show_colnames = FALSE, cluster_cols=TRUE, 
+         annotation_col=df, scale = 'row', cutree_cols = 2, cutree_rows = 2)
+
+```
+
+### GSEA-  
+Now, instead of looking at specific genes, we want to look at pathways that are differentially expressed overall. We will do this with Gene Set Enrichment Analysis.
+```{r, cache=TRUE}
+resOrdered.nona <- resOrdered_BEC[!is.na(resOrdered_BEC$padj),]
+genes_ordered <- sort(resOrdered.nona$log2FoldChange, decreasing = T)
+
+```
+
+- We now need to get the Hallmarks pathways gene sets using the msigdbr package:  
+```{r, message = FALSE, cache=TRUE}
+hallmarks <- msigdbr(species = "Homo sapiens", category = "H") %>% 
+  dplyr::select(gs_name, gene_symbol)
+```
+
+
+```{r, cache=TRUE}
+hm <-GSEA(genes_ordered, TERM2GENE = hallmarks)
+```
+
+- Finally, we visualize the results of this analysis using the dotPlot function:  
+```{r, cache=TRUE}
+
+hallmarks <- msigdbr(species = "Homo sapiens", category = "H")
+hallmarks <- hallmarks[,c('gs_name', 'gene_symbol')]
+
+dotplot(hm)
+
+```
+Beta Catenin – Homeostasis, cell proliferation, inflammation-associated cancer  
+Kras Signaling – Cell division, differentiation, apoptosis  
+Mitotic spindle – Cell division  
+Allograft rejection – Transplant rejection  
+G2M checkpoint- Cell proliferation  
+Inflammatory response  
+Epithelial Mesenchymal Transition – Wound healing  
+Il2 Stat5 Signaling – Immune function  
+Interferon alpha response – Contributes to apoptosis and drug resistance  
+TNFA signaling – Cell cycle regulation  
+
+
+These are some of the same pathways that were identified in the Camiolo study from which we took our data ^(1)^.
+
+***
+
+## SECOND ANALYSIS: GWAS -  
+Here, we used two sets of summary statistics. One was from a study of patients with adult onset asthma, and the other of patients with Childhood onset asthma. These two datasets include people of European Descent and use the same set of controls in order to reduce the number of SNPs that are unrelated to the disease.
+We will make a manhattan plot from each set of statistics:  
+```{r, cache=TRUE}
+data_adult = read.table("ADULT1_ADULT2_ONSET_ASTHMA.20180716.allchr.assoc.GC.gz", header = TRUE)
+head(data_adult)
+```
+
+```{r, cache=TRUE}
+
+
+fastman(data_adult, chr="CHR", bp = "BP", p="P_BOLT_LMM_INF", snp = "SNP", annotatePval = 1E-10, annotationWinMb = 6, colAbovePval = TRUE,genomewideline = FALSE, suggestiveline=FALSE,cex.text=0.6,speedup=TRUE)
+
+
+
+```
+
+```{r, cache=TRUE}
+data_2 = read.table("CHILD_ONSET_ASTHMA.20180501.allchr.assoc.GC.gz", header = TRUE)
+head(data_2)
+```
+
+```{r, cache=TRUE}
+
+fastman(data_2, chr="CHR", bp = "BP", p="P_BOLT_LMM_INF", snp = "SNP", annotatePval = 1E-10, colAbovePval = TRUE,genomewideline = FALSE, suggestiveline=FALSE,cex.text = 0.6,speedup=TRUE)
+
+```
+
+We can see from each plot that there are very many significant SNPs, especially in the childhood onset asthma plot. Thus, this GWAS analysis does not give us a single distinct SNP that is associated with age of onset. However, upon comparing the SNPs and their associated genes, we did find that these results match the results from the study from which we took the data. We correctly identified many of the same SNPs as the Ferreira study^(2)^.  
+
+This suggests that there is some genetic difference between those with Childhood Onset Asthma and those with Adult Onset Asthma - there are a few SNPS that are more common in AOA than COA and vice versa. This could present an opportunity to predict asthma onset in different patients and also targets for potential therapies.  
+
+#### Works Cited:
+1. Camiolo MJ, Zhou X, Oriss TB, et al. High-dimensional profiling clusters asthma severity by lymphoid and non-lymphoid status. Cell Rep. 2021;35(2):108974. doi:10.1016/j.celrep.2021.108974  
+
+2. Ferreira MAR, Mathur R, Vonk JM, et al. Genetic architectures of childhood- and adult-onset asthma are partly distinct. Am J Hum Genet. 2019;104(4):665-684. doi:10.1016/j.ajhg.2019.02.022  
+
+
